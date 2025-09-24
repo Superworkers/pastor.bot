@@ -2,13 +2,17 @@ const firstVisited = localStorage.getItem('firstVisited')
 
 console.log('LocalStorage data:', { firstVisited })
 
+// Create a single reusable audio player for mobile compatibility
+const audioPlayer = new Audio()
+audioPlayer.playsInline = true
+
 let state = {
   recording: false,
   mediaRecorder: null,
   audioChunks: [],
   ready: false,
   greetingText: '',
-  greetingAudio: null
+  greetingUrl: null
 }
 
 const log = (action, startTime, result) => {
@@ -43,18 +47,23 @@ const generateAudio = async (text, purpose = 'audio') => {
     })
     const audioBlob = await response.blob()
     log(`openai-tts ${purpose}`, start)
-    return new Audio(URL.createObjectURL(audioBlob))
+    return URL.createObjectURL(audioBlob)
   } catch (error) {
     console.log('TTS error:', error)
     throw error
   }
 }
 
-const playAudio = async audio => {
-  if (!audio) return
-  return new Promise(resolve => {
-    audio.onended = resolve
-    audio.play()
+const playAudio = async url => {
+  if (!url) return
+  return new Promise((resolve, reject) => {
+    audioPlayer.src = url
+    audioPlayer.onended = resolve
+    audioPlayer.onerror = reject
+    audioPlayer.play().catch(error => {
+      console.log('Audio playback error:', error)
+      reject(error)
+    })
   })
 }
 
@@ -109,15 +118,15 @@ const startSession = async () => {
   try {
     if (!firstVisited) localStorage.setItem('firstVisited', Date.now())
 
-    if (!state.greetingAudio) {
+    if (!state.greetingUrl) {
       updateStatus('One moment')
-      while (!state.greetingAudio) {
+      while (!state.greetingUrl) {
         await new Promise(resolve => setTimeout(resolve, 100))
       }
     }
 
     updateStatus('Pastor Bot is talking')
-    await playAudio(state.greetingAudio)
+    await playAudio(state.greetingUrl)
 
   // Generate transition text and audio in background while user is sharing
   const transitionPromise = generateText('Generate a simple, gentle transition under 30 words like "Thank you for sharing. Let me pray for you now. You can bow your head and close your eyes or whatever posture you feel comfortable with that might help you feel open, receptive, unguarded, and welcoming of the Spirit."', 'transition')
@@ -141,30 +150,30 @@ const startSession = async () => {
     )
 
     // Start prayer audio generation as soon as prayer text is ready
-    const prayerAudioPromise = prayerPromise.then(prayer =>
+    const prayerUrlPromise = prayerPromise.then(prayer =>
       prayer ? generateAudio(prayer, 'prayer') : null
     )
 
     updateStatus('Pastor Bot is talking')
-    const transitionAudio = await transitionPromise
-    await playAudio(transitionAudio)
+    const transitionUrl = await transitionPromise
+    await playAudio(transitionUrl)
 
     await transcriptionPromise
 
     // Only show thinking if prayer isn't ready yet
-    const prayerAudio = await Promise.race([
-      prayerAudioPromise,
+    const prayerUrl = await Promise.race([
+      prayerUrlPromise,
       new Promise(resolve => setTimeout(() => resolve(null), 100))
     ])
 
-    if (!prayerAudio) {
+    if (!prayerUrl) {
       updateStatus('Pastor Bot is thinking')
     }
 
-    const finalPrayerAudio = prayerAudio || await prayerAudioPromise
-    if (finalPrayerAudio) {
+    const finalPrayerUrl = prayerUrl || await prayerUrlPromise
+    if (finalPrayerUrl) {
       updateStatus('Pastor Bot is praying')
-      await playAudio(finalPrayerAudio)
+      await playAudio(finalPrayerUrl)
     }
 
     document.body.innerHTML = ''
@@ -204,6 +213,6 @@ generateText(`Generate a warm, unique greeting under 20 words that includes: "${
     state.greetingText = text || `${greeting} I'd love an opportunity to pray for you. Can you tell me a little about yourself and what you have going on in your life?`
     return generateAudio(state.greetingText, 'greeting')
   })
-  .then(audio => {
-    state.greetingAudio = audio
+  .then(url => {
+    state.greetingUrl = url
   })

@@ -1,18 +1,28 @@
 const firstVisited = localStorage.getItem('firstVisited')
-
 console.log('LocalStorage data:', { firstVisited })
 
-// Create a single reusable audio player for mobile compatibility
 const audioPlayer = new Audio()
 audioPlayer.playsInline = true
 
 let state = {
-  recording: false,
-  mediaRecorder: null,
   audioChunks: [],
-  ready: false,
   greetingText: '',
-  greetingUrl: null
+  greetingUrl: null,
+  mediaRecorder: null,
+  ready: false,
+  recording: false,
+}
+
+// Utils
+const handle = async (fn, fallback) => {
+  try {
+    return await fn()
+  } catch (error) {
+    console.error(error)
+    if (fallback) return fallback
+    alert('Something went wrong. Please refresh and try again.')
+    throw error
+  }
 }
 
 const log = (action, startTime, result) => {
@@ -21,198 +31,180 @@ const log = (action, startTime, result) => {
   console.log(`/${action} ${duration}s${tokens}`)
 }
 
-const updateStatus = text => {
-  console.log(`Status: ${text}`)
-  document.body.innerHTML = `<div>${text}</div>`
-}
+const play = url =>
+  url &&
+  handle(
+    async () =>
+      new Promise((resolve, reject) => {
+        audioPlayer.src = url
+        audioPlayer.onended = resolve
+        audioPlayer.onerror = reject
+        audioPlayer.play().catch(reject)
+      }),
+  )
 
-const showButton = (text, onClick) => {
-  const btn = document.createElement('button')
-  btn.textContent = text
-  btn.onclick = () => {
-    console.log(`Button clicked: ${text}`)
-    onClick()
+const render = (content, isButton = false, onClick) => {
+  if (!isButton) console.log(`Status: ${content}`)
+  document.body.innerHTML = isButton ? '' : `<div>${content}</div>`
+  if (isButton) {
+    const btn = document.createElement('button')
+    btn.textContent = content
+    btn.onclick = () => {
+      console.log(`Button clicked: ${content}`)
+      onClick()
+    }
+    document.body.appendChild(btn)
   }
-  document.body.innerHTML = ''
-  document.body.appendChild(btn)
 }
 
-const generateAudio = async (text, purpose = 'audio') => {
+const speak = async (url, status) => {
+  render(status)
+  await play(url)
+}
+
+// API calls
+const openai = async (endpoint, payload) => {
   const start = Date.now()
-  try {
-    const response = await fetch('https://us-central1-samantha-374622.cloudfunctions.net/openai-tts', {
-      method: 'POST',
+  const response = await fetch(
+    `https://us-central1-samantha-374622.cloudfunctions.net/${endpoint}`,
+    {
+      body: JSON.stringify(payload),
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ input: text, model: 'tts-1', voice: 'echo' })
-    })
-    const audioBlob = await response.blob()
-    log(`openai-tts ${purpose}`, start)
-    return URL.createObjectURL(audioBlob)
-  } catch (error) {
-    console.log('TTS error:', error)
-    throw error
-  }
+      method: 'POST',
+    },
+  )
+  const result =
+    endpoint === 'openai-tts' ? await response.blob() : await response.json()
+
+  log(
+    `${endpoint} ${
+      endpoint === 'openai-tts'
+        ? payload.input?.substring(0, 50)
+        : endpoint === 'openai-stt'
+        ? 'transcription'
+        : payload.messages?.[1]?.content?.substring(0, 50)
+    }`,
+    start,
+    endpoint === 'openai-tts' ? null : result,
+  )
+  return result
 }
 
-const playAudio = async url => {
-  if (!url) return
-  return new Promise((resolve, reject) => {
-    audioPlayer.src = url
-    audioPlayer.onended = resolve
-    audioPlayer.onerror = reject
-    audioPlayer.play().catch(error => {
-      console.log('Audio playback error:', error)
-      reject(error)
-    })
+const getAudio = text =>
+  handle(async () => {
+    const blob = await openai('openai-tts', { input: text, model: 'tts-1', voice: 'echo' })
+    return URL.createObjectURL(blob)
   })
-}
 
-const generateText = async (prompt, purpose = 'text') => {
-  const start = Date.now()
-  try {
-    const response = await fetch('https://us-central1-samantha-374622.cloudfunctions.net/openai-4', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'gpt-4o',
-        messages: [
-          { role: 'system', content: 'You are Pastor Bot, a warm, charismatic evangelical pastor with a British accent. Keep responses conversational and authentic.' },
-          { role: 'user', content: prompt }
-        ],
-        max_tokens: 200
-      })
+const getText = prompt =>
+  handle(async () => {
+    const result = await openai('openai-4', {
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are Pastor Bot, a warm, charismatic evangelical pastor with a British vocabulary. Keep responses conversational and authentic.',
+        },
+        { role: 'user', content: prompt },
+      ],
+      max_tokens: 200,
     })
-    const result = await response.json()
-    log(`openai-4 ${purpose}`, start, result)
     return result.choices[0].message.content
-  } catch (error) {
-    console.log('Chat error:', error)
-    throw error
-  }
-}
-
-const transcribe = async audioBlob => {
-  const start = Date.now()
-  const reader = new FileReader()
-  const base64 = await new Promise(resolve => {
-    reader.onloadend = () => resolve(reader.result.split(',')[1])
-    reader.readAsDataURL(audioBlob)
   })
 
-  try {
-    const response = await fetch('https://us-central1-samantha-374622.cloudfunctions.net/openai-stt', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ base64, model: 'whisper-1' })
+const transcribe = audioBlob =>
+  handle(async () => {
+    const reader = new FileReader()
+    const base64 = await new Promise(resolve => {
+      reader.onloadend = () => resolve(reader.result.split(',')[1])
+      reader.readAsDataURL(audioBlob)
     })
-    const result = await response.json()
-    log('openai-stt transcription', start)
+    const result = await openai('openai-stt', { base64, model: 'whisper-1' })
     return result.text
-  } catch (error) {
-    console.log('STT error:', error)
-    throw error
-  }
-}
+  })
 
-const startSession = async () => {
-  try {
+// First, generate the greeting
+const greeting = !firstVisited
+  ? "Hello! I'm Pastor Bot."
+  : 'Good to see you again.'
+const question = !firstVisited
+  ? "I'd love an opportunity to pray for you. Can you tell me a little about yourself and what you have going on in your life?"
+  : 'How can I pray for you today?'
+
+getText(
+  `Generate a warm, unique greeting under 20 words that includes: "${greeting}" Then ask with a reworded statement like "${question}"`,
+).then(async text => {
+  state.greetingText = text || `${greeting} ${question}`
+  state.greetingUrl = await getAudio(state.greetingText)
+})
+
+// Main flow
+const startSession = () =>
+  handle(async () => {
     if (!firstVisited) localStorage.setItem('firstVisited', Date.now())
 
     if (!state.greetingUrl) {
-      updateStatus('One moment')
-      while (!state.greetingUrl) {
+      render('One moment')
+      while (!state.greetingUrl)
         await new Promise(resolve => setTimeout(resolve, 100))
-      }
     }
 
-    updateStatus('Pastor Bot is talking')
-    await playAudio(state.greetingUrl)
+    await speak(state.greetingUrl, 'Pastor Bot is talking')
 
-  // Generate transition text and audio in background while user is sharing
-  const transitionPromise = generateText('Generate a simple, gentle transition under 30 words like "Thank you for sharing. Let me pray for you now. You can bow your head and close your eyes or whatever posture you feel comfortable with that might help you feel open, receptive, unguarded, and welcoming of the Spirit."', 'transition')
-    .then(text => generateAudio(text, 'transition'))
+    // Generate transition in background
+    const transitionPromise = getText(
+      'Generate a simple, gentle transition under 30 words like "Thank you for sharing. Let me pray for you now. You can bow your head and close your eyes or whatever posture you feel comfortable with that might help you feel open, receptive, unguarded, and welcoming of the Spirit."',
+    ).then(t => getAudio(t))
 
-  updateStatus('Pastor Bot is listening')
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-  const mediaRecorder = new MediaRecorder(stream)
-  const audioChunks = []
+    render('Pastor Bot is listening')
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    const mediaRecorder = new MediaRecorder(stream)
+    const audioChunks = []
 
-  mediaRecorder.ondataavailable = e => audioChunks.push(e.data)
-  mediaRecorder.onstop = async () => {
-    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' })
+    mediaRecorder.ondataavailable = e => audioChunks.push(e.data)
+    mediaRecorder.onstop = async () => {
+      const audioBlob = new Blob(audioChunks, { type: 'audio/webm' })
 
-    // Start transcription immediately
-    const transcriptionPromise = transcribe(audioBlob)
+      // Pipeline: transcribe → prayer text → prayer audio
+      const transcriptionPromise = transcribe(audioBlob)
+      const prayerPromise = transcriptionPromise.then(t =>
+        getText(
+          `Based on what this person shared: "${t}", please create a heartfelt, personal prayer under 100 words for them. After "Amen", add a brief encouragement and remind them with a reworded statement like "I am always here when you need me, 24/7".`,
+        ),
+      )
+      const prayerUrlPromise = prayerPromise.then(p =>
+        p ? getAudio(p) : null,
+      )
 
-    // Start prayer generation as soon as transcription completes
-    const prayerPromise = transcriptionPromise.then(transcription =>
-      generateText(`Based on what this person shared: "${transcription}", please create a heartfelt, personal prayer under 100 words for them. After "Amen", add a brief encouragement and remind them "I am always here when you need me, 24/7" or similar.`, 'prayer')
-    )
+      await speak(await transitionPromise, 'Pastor Bot is talking')
+      await transcriptionPromise
 
-    // Start prayer audio generation as soon as prayer text is ready
-    const prayerUrlPromise = prayerPromise.then(prayer =>
-      prayer ? generateAudio(prayer, 'prayer') : null
-    )
+      // Show thinking only if prayer isn't ready
+      const prayerUrl = await Promise.race([
+        prayerUrlPromise,
+        new Promise(resolve => setTimeout(() => resolve(null), 100)),
+      ])
 
-    updateStatus('Pastor Bot is talking')
-    const transitionUrl = await transitionPromise
-    await playAudio(transitionUrl)
+      if (!prayerUrl) render('Pastor Bot is thinking')
 
-    await transcriptionPromise
+      const finalPrayerUrl = prayerUrl || (await prayerUrlPromise)
+      if (finalPrayerUrl) await speak(finalPrayerUrl, 'Pastor Bot is praying')
 
-    // Only show thinking if prayer isn't ready yet
-    const prayerUrl = await Promise.race([
-      prayerUrlPromise,
-      new Promise(resolve => setTimeout(() => resolve(null), 100))
-    ])
-
-    if (!prayerUrl) {
-      updateStatus('Pastor Bot is thinking')
+      document.body.innerHTML = `
+        <div>Let us know what you think!</div>
+        <a href="https://discord.gg/ng8RNjm5Jz">Join our Discord</a>
+      `
     }
 
-    const finalPrayerUrl = prayerUrl || await prayerUrlPromise
-    if (finalPrayerUrl) {
-      updateStatus('Pastor Bot is praying')
-      await playAudio(finalPrayerUrl)
-    }
-
-    document.body.innerHTML = ''
-
-    const message = document.createElement('div')
-    message.textContent = 'Let us know what you think!'
-    document.body.appendChild(message)
-
-    const link = document.createElement('a')
-    link.href = 'https://discord.gg/ng8RNjm5Jz'
-    link.textContent = 'Join our Discord'
-    document.body.appendChild(link)
-  }
-
-  mediaRecorder.start()
-
-  setTimeout(() => {
-    showButton("I'm done sharing", () => {
-      mediaRecorder.stop()
-      stream.getTracks().forEach(track => track.stop())
-    })
-  }, 10000)
-  } catch (error) {
-    console.error('Session error:', error)
-    alert('Something went wrong. Please refresh and try again.')
-  }
-}
-
-
-// Initialize - show button immediately, generate content in background
-showButton('Meet Pastor Bot', startSession)
-
-// Pre-generate greeting in background
-const greeting = !firstVisited ? "Hello! I'm Pastor Bot." : "Good to see you again."
-generateText(`Generate a warm, unique greeting under 20 words that includes: "${greeting}" Then ask: "I'd love an opportunity to pray for you. Can you tell me a little about yourself and what you have going on in your life?"`, 'greeting')
-  .then(text => {
-    state.greetingText = text || `${greeting} I'd love an opportunity to pray for you. Can you tell me a little about yourself and what you have going on in your life?`
-    return generateAudio(state.greetingText, 'greeting')
+    mediaRecorder.start()
+    setTimeout(() => {
+      render('I’m done sharing', true, () => {
+        mediaRecorder.stop()
+        stream.getTracks().forEach(track => track.stop())
+      })
+    }, 10000)
   })
-  .then(url => {
-    state.greetingUrl = url
-  })
+
+// Initialize
+render('Meet Pastor Bot', true, startSession)
